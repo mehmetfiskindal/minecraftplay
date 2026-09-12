@@ -1,0 +1,18 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "minecraft": {
+      "type": "local",
+      "command": ["C:\\Program Files\\nodejs\\node.exe", "C:\\Users\\salih\\minecraftplay\\bot\\index.js"],
+      "enabled": true,
+      "environment": { "NODE_OPTIONS": "--max-old-space-size=2048", "MC_PORT": "25565" }
+    }
+  },
+  "instructions": ["AGENTS.md"],
+  "experimental": {
+    "mcp_timeout": 180000
+  },
+  "permission": {
+    "webfetch": "ask"
+  }
+}
