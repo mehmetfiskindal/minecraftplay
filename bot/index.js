@@ -46,10 +46,14 @@ function ensureBot () {
     bot.once('spawn', async () => {
       mcData = bot.registry
       const defaultMove = new Movements(bot)
-      defaultMove.allow1by1towers = false
+      defaultMove.allow1by1towers = true
+      defaultMove.canDig = true
+      defaultMove.allowParkour = true
+      defaultMove.allowSprinting = true
       bot.pathfinder.setMovements(defaultMove)
+      bot.pathfinder.LOSWhenPlacingBlocks = false
       bot.autoEat.options = { priority: 'foodPoints', startAt: 14, bannedFood: [] }
-      bot.pathfinder.thinkTimeout = 6000
+      bot.pathfinder.thinkTimeout = 10000
       let chunkCount = 0
       bot.on('chunkColumnLoad', () => { chunkCount++ })
       const t0 = Date.now()
@@ -249,10 +253,84 @@ function withTimeout (promise, ms, label) {
   ])
 }
 
+let gotoCleanup = null
+
 function gotoGoal (goal, ms = 90000) {
+  if (gotoCleanup) gotoCleanup()
   return withTimeout(new Promise((resolve, reject) => {
-    bot.once('goal_reached', resolve)
-    bot.once('path_update', (r) => { if (r === 'noPath') reject(new Error('no path found')) })
+    let done = false
+    let stuckRecoveryAt = 0
+
+    const finish = (fn, reason) => {
+      if (done) return
+      done = true
+      cleanup()
+      fn(reason)
+    }
+
+    const onGoal = () => {
+      const p = bot.entity.position
+      if (goal.isEnd(p.floored())) {
+        finish(resolve)
+      }
+    }
+    const onNoPath = (results) => {
+      if (!results || typeof results === 'string') return
+      if (results.status === 'noPath') finish(reject, new Error('no path found'))
+      else if (results.status === 'timeout') finish(reject, new Error('path search timeout'))
+    }
+    const onPathReset = async (reason) => {
+      if (reason !== 'stuck' && reason !== 'dig_error' && reason !== 'place_error' && reason !== 'no_scaffolding_blocks') return
+      if (done || Date.now() - stuckRecoveryAt < 8000) return
+      stuckRecoveryAt = Date.now()
+
+      bot.pathfinder.stop()
+      bot.clearControlStates()
+
+      const p = bot.entity.position
+      const yaw = bot.entity.yaw
+      const fwd = new Vec3(-Math.sin(yaw), 0, -Math.cos(yaw)).normalize()
+      const goalPos = goal.entity ? goal.entity.position : new Vec3(goal.x, goal.y, goal.z)
+      const toGoal = new Vec3(goalPos.x - p.x, 0, goalPos.z - p.z).normalize()
+      const dir = toGoal.lengthSq() > 0 ? toGoal : fwd
+
+      const candidates = []
+      const dirStep = new Vec3(Math.round(dir.x), 0, Math.round(dir.z))
+      for (let i = 1; i <= 2; i++) {
+        for (const dy of [0, 1]) {
+          const t = p.floored().plus(dirStep.scaled(i)).offset(0, dy, 0)
+          const b = bot.blockAt(t)
+          if (!b) continue
+          if (b.diggable && b.boundingBox === 'block' && b.name !== 'bedrock' && b.name !== 'water' && b.name !== 'lava') {
+            candidates.push({ block: b, tool: bot.pathfinder.bestHarvestTool(b) })
+          }
+        }
+      }
+      const seen = new Set()
+      for (const { block, tool } of candidates) {
+        if (seen.has(block.position.toString())) continue
+        seen.add(block.position.toString())
+        try {
+          if (tool) await bot.equip(tool, 'hand')
+          bot.clearControlStates()
+          await withTimeout(bot.dig(block, true), 20000, 'unstuck-dig')
+          await new Promise(r => setTimeout(r, 400))
+        } catch (e) { /* keep trying next candidate */ }
+      }
+      try { if (!done) bot.pathfinder.setGoal(goal) } catch (e) { /* ignore */ }
+    }
+
+    function cleanup () {
+      bot.removeListener('goal_reached', onGoal)
+      bot.removeListener('path_update', onNoPath)
+      bot.removeListener('path_reset', onPathReset)
+      if (gotoCleanup === cleanup) gotoCleanup = null
+    }
+
+    gotoCleanup = cleanup
+    bot.on('goal_reached', onGoal)
+    bot.on('path_update', onNoPath)
+    bot.on('path_reset', onPathReset)
     bot.pathfinder.setGoal(goal)
   }), ms, 'goto')
 }
@@ -304,7 +382,7 @@ server.tool('observe', 'Çevreyi tara: yakındaki cevher, ağaç, su, lava, sand
 
 server.tool('goto', 'Belirtilen koordinata git (yol bulma otomatik).', { x: z.number(), y: z.number(), z: z.number() }, async ({ x, y, z }) =>
   withBot(async () => {
-    await gotoGoal(new goals.GoalNear(x, y, z, 1))
+    await gotoGoal(new goals.GoalNear(x, y, z, 0.5))
     return `varıldı: ${fmtPos(bot.entity.position)}`
   }))
 
